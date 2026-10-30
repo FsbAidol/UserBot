@@ -163,12 +163,29 @@ python3 -m heroku
 ### Official hostings
 <details>
 <summary><b>🌘 HikkaHost</b></summary>
-  
+ 
   1. Go to [@hikkahost_bot](https://t.me/hikkahost_bot)
   2. Press "Install"
   3. Choose "🪐 Heroku"
   And continue installation.
   > **After that, you will receive a link, open it and login in your account.**
+
+</details>
+
+<details>
+<summary><b>🆓 ctrlfree.host</b></summary>
+
+  1. Зарегистрируйтесь на [ctrlfree.host](https://ctrlfree.host)
+  2. Создайте новый сервис и подключите этот репозиторий (GitHub)
+  3. Выберите ветку `arena/f9b3f5f2-userbot`
+  4. В разделе **Environment Variables** добавьте:
+     - `API_ID` — ваш API ID от [my.telegram.org](https://my.telegram.org/apps)
+     - `API_HASH` — ваш API Hash от [my.telegram.org](https://my.telegram.org/apps)
+  5. **Build command:** `pip install -r requirements.txt`
+  6. **Start command:** `bash start.sh` или `python3 -m heroku --no-auth`
+  7. Сохраните и разверните
+
+  > **Важно:** Первая авторизация требует интерактивного ввода (QR-код или номер телефона). Если хостинг не поддерживает интерактивный терминал, создайте сессию локально (`python3 -m heroku` на ПК), скопируйте `SESSION_STRING` и добавьте его в переменные окружения хостинга.
 
 </details>
 
