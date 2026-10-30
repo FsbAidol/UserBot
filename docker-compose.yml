@@ -3,6 +3,7 @@ services:
     container_name: heroku_ub
     build:
       context: .
+      dockerfile: deploy/local/Dockerfile
     volumes:
       - worker:/data
     stop_signal: SIGINT

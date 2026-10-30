@@ -1,11 +1,10 @@
 # Конфигурация приложения для Amvera Cloud.
 # https://docs.amvera.ru/applications/configuration/config-file.html
 #
-# Приложение собирается из deploy/amvera/Dockerfile и запускает
-# deploy/amvera/supervisor.py: страница входа с QR-кодом + сам юзербот.
+# Собирается корневой Dockerfile (он же используется на BotHost), запускается
+# deploy/paas/supervisor.py: страница входа с QR-кодом + сам юзербот.
 #
-# containerPort и APP_PORT в Dockerfile должны совпадать (8080).
-# Если меняете порт — поменяйте оба значения: здесь и в Dockerfile.
+# containerPort должен совпадать с APP_PORT из Dockerfile (8080).
 
 meta:
   environment: docker
@@ -14,7 +13,7 @@ meta:
     version: latest
 
 build:
-  dockerfile: deploy/amvera/Dockerfile
+  dockerfile: Dockerfile
   skip: false
 
 run:

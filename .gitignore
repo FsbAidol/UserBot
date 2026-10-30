@@ -184,3 +184,7 @@ unknown_errors.txt
 *credentials*.json
 git.zip
 .git.zip
+
+# PaaS-bootstrap artifacts
+.requirements_hash
+/data/

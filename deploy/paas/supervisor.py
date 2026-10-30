@@ -1,28 +1,33 @@
 #!/usr/bin/env python3
-"""Точка входа Heroku Userbot для Amvera Cloud (и любого PaaS без терминала).
+"""Точка входа Heroku Userbot для PaaS без терминала (Amvera, BotHost и др.).
 
 Зачем это нужно
 ---------------
 Heroku Userbot при первом запуске спрашивает API ID, API hash, телефон и код
-из Telegram через stdin. На Amvera консоли нет, поэтому обычный запуск
+из Telegram через stdin. На PaaS консоли нет, поэтому обычный запуск
 `python -m heroku` падает с EOFError.
 
 Этот скрипт заменяет терминал веб-страницей:
 
-1. поднимает HTTP-сервер на порту приложения (Amvera ждёт открытый порт);
-2. если в /data ещё нет сессии — показывает страницу входа со QR-кодом
+1. поднимает HTTP-сервер на порту приложения (PaaS ждёт открытый порт);
+2. если сессии ещё нет — показывает страницу входа со QR-кодом
    (Telegram → Настройки → Устройства → Подключить устройство);
-3. после успешного входа сохраняет сессию в /data/sessions и запускает
+   там же можно ввести api_id/api_hash, если переменные окружения недоступны;
+3. после успешного входа сохраняет сессию в <данные>/sessions и запускает
    сам юзербот (`python -m heroku --root`) как дочерний процесс;
 4. следит за процессом юзербота и перезапускает его при падении.
 
+Данные ищутся в таком порядке: переменная HEROKU_DATA_DIR → /data (Amvera,
+Docker) → /app/data (BotHost) → <репозиторий>/data.
+
 Доступ к странице входа защищён ключом: он печатается в логах приложения
-(или задаётся переменной AMVERA_LOGIN_TOKEN).
+(или задаётся переменной LOGIN_TOKEN / AMVERA_LOGIN_TOKEN).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import secrets
@@ -40,21 +45,44 @@ from urllib.parse import parse_qs, urlparse
 APP_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(APP_DIR))
 
-DATA_DIR = Path(os.environ.get("HEROKU_DATA_DIR", "/data"))
+
+def _detect_data_dir() -> Path:
+    """Куда писать сессии и конфиг: /data у Amvera, /app/data у BotHost."""
+
+    for name in ("HEROKU_DATA_DIR", "DATA_DIR"):
+        if value := os.environ.get(name):
+            return Path(value).expanduser().resolve()
+
+    for candidate in ("/data", "/app/data"):
+        path = Path(candidate)
+        if path.is_dir() and os.access(path, os.W_OK):
+            return path
+
+    return APP_DIR / "data"
+
+
+DATA_DIR = _detect_data_dir()
 SESSIONS_DIR = DATA_DIR / "sessions"
 CONFIG_PATH = DATA_DIR / "config.json"
 
-# containerPort в amvera.yml должен совпадать с этим портом
-PORT = int(os.environ.get("APP_PORT", "8080"))
+# Порт: у BotHost приходит в PORT, у Amvera — APP_PORT (containerPort в amvera.yml)
+PORT = int(os.environ.get("PORT") or os.environ.get("APP_PORT") or 8080)
 
 # Ключ доступа к странице входа. Печатается в логах при старте.
 LOGIN_KEY = (
-    os.environ.get("AMVERA_LOGIN_TOKEN")
-    or os.environ.get("LOGIN_TOKEN")
+    os.environ.get("LOGIN_TOKEN")
+    or os.environ.get("AMVERA_LOGIN_TOKEN")
     or secrets.token_urlsafe(9)
 )
 
-BOT_CMD = [sys.executable, "-m", "heroku", "--root"]
+BOT_CMD = [
+    sys.executable,
+    "-m",
+    "heroku",
+    "--root",
+    "--data-root",
+    str(DATA_DIR),
+]
 BOT_CWD = str(APP_DIR)
 RESTART_DELAYS = [3, 5, 10, 20, 30]
 
@@ -77,7 +105,7 @@ STATE: dict = {
 
 
 def log(message: str) -> None:
-    print(f"[amvera] {message}", flush=True)
+    print(f"[heroku-paas] {message}", flush=True)
 
 
 def set_state(phase: str | None = None, detail: str | None = None, **kwargs) -> None:
@@ -116,6 +144,49 @@ def ensure_dirs() -> None:
         os.chmod(SESSIONS_DIR, 0o700)
     except OSError:
         pass
+
+
+def ensure_requirements_hash() -> None:
+    """Гасит авто-`pip install` в heroku/__main__ при каждом старте.
+
+    На BotHost каталог /app примонтирован из репозитория, поэтому файл
+    .requirements_hash из образа не виден — создаём его на месте.
+    """
+
+    marker = APP_DIR / ".requirements_hash"
+    requirements = APP_DIR / "requirements.txt"
+    try:
+        if marker.exists() or not requirements.is_file():
+            return
+        digest = hashlib.sha256(requirements.read_bytes()).hexdigest()
+        marker.write_text(digest, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def link_loaded_modules() -> None:
+    """Модули юзербота хранит на постоянном диске, а не в каталоге кода."""
+
+    target = DATA_DIR / "loaded_modules"
+    link = APP_DIR / "loaded_modules"
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink():
+            return
+        if link.is_dir():
+            if any(link.iterdir()):
+                return
+            link.rmdir()
+        if not link.exists():
+            os.symlink(target, link)
+    except OSError:
+        pass
+
+
+def prepare_environment() -> None:
+    ensure_dirs()
+    ensure_requirements_hash()
+    link_loaded_modules()
 
 
 def read_config() -> dict:
@@ -364,21 +435,50 @@ def login_worker() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def spawn_bot() -> subprocess.Popen:
+def _bot_cwd() -> tuple[str, dict]:
+    """Откуда запускать `python -m heroku`.
+
+    Обычно это каталог кода (/app). Но если он примонтирован только для
+    чтения (бывает на PaaS), запускаем из папки данных: туда можно писать
+    .requirements_hash, а пакет находится через PYTHONPATH.
+    """
+
     env = dict(os.environ)
-    env.setdefault("DOCKER", "true")
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("HEROKU_NO_GIT", "1")
     env.setdefault("GIT_PYTHON_REFRESH", "quiet")
 
+    if os.access(APP_DIR, os.W_OK):
+        return BOT_CWD, env
+
+    try:
+        requirements = DATA_DIR / "requirements.txt"
+        if not requirements.exists():
+            os.symlink(APP_DIR / "requirements.txt", requirements)
+    except OSError:
+        pass
+
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(APP_DIR), env.get("PYTHONPATH", "")])
+    )
+    log("каталог кода только для чтения, запускаю из папки данных")
+    return str(DATA_DIR), env
+
+
+def spawn_bot() -> subprocess.Popen:
+    cwd, env = _bot_cwd()
+
     log("запускаю юзербота: " + " ".join(BOT_CMD))
     return subprocess.Popen(
         BOT_CMD,
-        cwd=BOT_CWD,
+        cwd=cwd,
         env=env,
         stdin=subprocess.DEVNULL,
         stdout=sys.stdout,
         stderr=sys.stderr,
+        # Своя сессия/группа процессов: рестарты юзербота (killpg) не должны
+        # задевать HTTP-сервер и родителя
+        start_new_session=True,
     )
 
 
@@ -459,9 +559,9 @@ PHASE_TEXT = {
     "init": ("Запуск", "Готовлю контейнер…"),
     "no_creds": (
         "Нужны API ID и API hash",
-        "Откройте «Переменные» проекта в Amvera и добавьте api_id и api_hash "
-        "(их выдаёт my.telegram.org → API development tools). После этого "
-        "перезапустите приложение.",
+        "Введите их ниже (my.telegram.org → API development tools) — они "
+        "сохранятся в config.json на постоянном диске. Можно вместо этого "
+        "добавить переменные api_id и api_hash в настройках приложения.",
     ),
     "login": (
         "Вход в Telegram",
@@ -487,7 +587,7 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Heroku Userbot — Amvera</title>
+<title>Heroku Userbot — вход</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -507,6 +607,11 @@ PAGE = """<!doctype html>
   .qr { background: #fff; border-radius: 14px; padding: 12px; display: flex; justify-content: center; }
   .qr img { display: block; width: 100%; max-width: 340px; height: auto; }
   .row { display: flex; gap: 10px; margin-top: 14px; }
+  .stack { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+  .stack input, .row input[type=text] {
+    padding: 12px 14px; border-radius: 10px; border: 1px solid #333d4a;
+    background: #141a21; color: inherit; font-size: 15px;
+  }
   input[type=password] {
     flex: 1; padding: 12px 14px; border-radius: 10px; border: 1px solid #333d4a;
     background: #141a21; color: inherit; font-size: 15px;
@@ -545,6 +650,12 @@ PAGE = """<!doctype html>
     <button type="submit">Войти</button>
   </form>
 
+  <form id="credsform" class="stack hidden" autocomplete="off">
+    <input type="text" id="apii" inputmode="numeric" placeholder="api_id, например 1234567" required>
+    <input type="text" id="apih" placeholder="api_hash, 32 символа" required>
+    <button type="submit">Сохранить и показать QR</button>
+  </form>
+
   <div class="meta" id="meta"></div>
 
   <div class="row" id="resetbox" style="display:none">
@@ -565,6 +676,7 @@ function setPhase(phase, title, hint, hasQr) {
     phase === "login_error" || phase === "no_creds" ? "err" : "warn");
   $("qrbox").classList.toggle("hidden", !hasQr);
   $("pwform").classList.toggle("hidden", phase !== "password");
+  $("credsform").classList.toggle("hidden", phase !== "no_creds");
   $("resetbox").style.display = phase === "running" || phase === "login_error" ? "flex" : "none";
 }
 
@@ -596,6 +708,25 @@ $("pwform").addEventListener("submit", async (ev) => {
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({password: value})
   });
+  setTimeout(poll, 800);
+});
+
+$("credsform").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const apiId = $("apii").value.trim();
+  const apiHash = $("apih").value.trim();
+  const r = await fetch("api/creds?key=" + encodeURIComponent(KEY), {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({api_id: apiId, api_hash: apiHash})
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    $("hint").textContent = "Не принято: " + (err.error || "проверьте значения");
+    return;
+  }
+  $("apii").value = "";
+  $("apih").value = "";
   setTimeout(poll, 800);
 });
 
@@ -726,6 +857,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "password not required"}, 400)
             return
 
+        if path == "/api/creds":
+            api_id = str(payload.get("api_id") or "").strip()
+            api_hash = str(payload.get("api_hash") or "").strip().lower()
+            if not api_id.isdigit():
+                self._json({"error": "api_id должен быть числом"}, 400)
+                return
+            if len(api_hash) != 32 or any(
+                ch not in "0123456789abcdef" for ch in api_hash
+            ):
+                self._json({"error": "api_hash — 32 hex-символа"}, 400)
+                return
+            save_config(int(api_id), api_hash)
+            set_state("idle", "Ключи сохранены, готовлю QR-код", qr_svg="")
+            self._json({"ok": True})
+            return
+
         if path == "/api/reset":
             reset_requested.set()
             self._json({"ok": True})
@@ -765,17 +912,22 @@ def reset_sessions() -> None:
 
 
 def main() -> int:
-    ensure_dirs()
+    prepare_environment()
 
     log("=" * 64)
-    log("Heroku Userbot on Amvera")
+    log("Heroku Userbot — PaaS bootstrap (страница входа + супервизор)")
+    log(f"код: {APP_DIR}")
     log(f"данные: {DATA_DIR}")
+    log(f"порт: {PORT}")
     log(f"КЛЮЧ ДОСТУПА К СТРАНИЦЕ ВХОДА: {LOGIN_KEY}")
     log(f"откройте: https://<домен-приложения>/?key={LOGIN_KEY}")
     log("=" * 64)
 
     if not get_creds():
-        log("api_id/api_hash не заданы — добавьте их в переменные проекта")
+        log(
+            "api_id/api_hash не заданы — введите их на странице входа "
+            "или добавьте переменные api_id и api_hash"
+        )
 
     threading.Thread(target=http_worker, name="http", daemon=True).start()
     threading.Thread(target=login_worker, name="login", daemon=True).start()
