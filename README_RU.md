@@ -172,6 +172,16 @@ sudo apt update ; sudo apt upgrade -y ; sudo apt install -y python3 python3-venv
 
 
 
+### PaaS/хостинг без терминала (Amvera и подобные)
+> Подходит для Amvera, Railway, Render и любых «app engine», где нельзя
+> вводить команды в консоль.
+
+В репозитории уже есть готовая конфигурация: `amvera.yml`,
+`deploy/amvera/Dockerfile` и `deploy/amvera/supervisor.py` — он поднимает
+страницу входа с QR-кодом вместо консольного ввода и хранит данные в `/data`.
+
+Пошаговая инструкция: [deploy/amvera/README_RU.md](deploy/amvera/README_RU.md)
+
 ## Дополнительные функции
 
 <details>
