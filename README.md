@@ -181,11 +181,11 @@ python3 -m heroku
   4. В разделе **Environment Variables** добавьте:
      - `API_ID` — ваш API ID от [my.telegram.org](https://my.telegram.org/apps)
      - `API_HASH` — ваш API Hash от [my.telegram.org](https://my.telegram.org/apps)
-  5. **Build command:** `pip install -r requirements.txt`
-  6. **Start command:** `bash start.sh` или `python3 -m heroku --no-auth`
+  5. **Точка входа (Entry point):** `app.py`
+  6. **Версия Python:** `3.11`
   7. Сохраните и разверните
 
-  > **Важно:** Первая авторизация требует интерактивного ввода (QR-код или номер телефона). Если хостинг не поддерживает интерактивный терминал, создайте сессию локально (`python3 -m heroku` на ПК), скопируйте `SESSION_STRING` и добавьте его в переменные окружения хостинга.
+  > **Важно:** Первая авторизация требует интерактивного ввода (QR-код или номер телефона). Если хостинг не поддерживает интерактивный терминал, создайте сессию локально (`python3 -m heroku` на ПК), получите `SESSION_STRING` и добавьте его в переменные окружения хостинга.
 
 </details>
 
